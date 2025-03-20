@@ -1,0 +1,226 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Secure Encrypted Chat</title>
+  <!-- CryptoJS -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js"></script>
+  <style>
+    body {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      font-family: Arial, sans-serif;
+      margin: 0;
+      padding: 20px;
+    }
+    .info {
+      font-size: 14px;
+      color: #555;
+      text-align: center;
+    }
+    .chat-container {
+      width: 50%;
+      text-align: center;
+    }
+    h2 {
+      margin-top: 20px;
+    }
+    ul {
+      list-style-type: none;
+      padding: 0;
+    }
+    li {
+      background: #f4f4f4;
+      padding: 8px;
+      margin-bottom: 5px;
+      border-radius: 5px;
+    }
+    #decryptedMessages {
+      max-height: 300px;
+      overflow-y: auto;
+    }
+    input {
+      width: 80%;
+      padding: 10px;
+      margin: 10px 0;
+      border: 1px solid #ccc;
+      border-radius: 5px;
+    }
+    button {
+      padding: 10px 20px;
+      border: none;
+      background-color: #007bff;
+      color: white;
+      cursor: pointer;
+      border-radius: 5px;
+    }
+    button:hover {
+      background-color: #0056b3;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="chat-container">
+    <!-- User & Public Key Display -->
+    <p class="info">User ID: <span id="userIdDisplay">Loading...</span></p>
+    <p class="info">Public Key: <span id="publicKey">Generating...</span></p>
+
+    <!-- Text Input for Other User's ID (instead of dropdown) -->
+    <h2>Enter Another User's ID for Key:</h2>
+    <input type="text" id="otherUserId" placeholder="e.g. user_6799" />
+    <button onclick="fetchOneKey()">Get Key & Compute Shared Key</button>
+
+    <h2>Computed Encryption Key:</h2>
+    <p class="info"><span id="encryptionKey">Waiting for entry...</span></p>
+
+    <h2>Decrypted Messages</h2>
+    <ul id="decryptedMessages"></ul>
+
+    <h2>Enter a Message to Encrypt</h2>
+    <input type="text" id="messageInput" placeholder="Type your message" />
+    <button onclick="encryptMessage()">Encrypt & Store</button>
+  </div>
+
+  <script>
+    const g = 5n;
+    const p = 99999999977n;
+    let secretNumber;
+    let publicKey;
+    let encryptionKey = null;
+    let userId = localStorage.getItem("userId") || "user_" + Math.floor(Math.random() * 10000);
+    localStorage.setItem("userId", userId);
+
+    // Replaces the old drop-down approach
+    async function fetchOneKey() {
+      try {
+        const otherUserId = document.getElementById("otherUserId").value.trim();
+        if (!otherUserId) {
+          alert("Please enter a valid user ID.");
+          return;
+        }
+
+        // GET /get_keys returns a dictionary of { user_id: public_key }
+        // Instead of fetching all keys, we fetch them once, then extract the specific user:
+        let response = await fetch("/get_keys");
+        let keys = await response.json();
+
+        if (keys[otherUserId]) {
+          let selectedPublicKey = BigInt(keys[otherUserId]);
+          computeSharedKey(selectedPublicKey);
+        } else {
+          alert("Could not find public key for " + otherUserId);
+        }
+      } catch (error) {
+        console.error("Error fetching single key:", error);
+      }
+    }
+
+    function computeSharedKey(selectedPublicKey) {
+      // same modPow approach
+      encryptionKey = modPow(selectedPublicKey, secretNumber, p);
+      document.getElementById("encryptionKey").textContent = encryptionKey.toString();
+      decryptMessages();
+    }
+
+    function modPow(base, exponent, modulus) {
+      let result = 1n;
+      base = base % modulus;
+      while (exponent > 0n) {
+        if (exponent & 1n) {
+          result = (result * base) % modulus;
+        }
+        exponent = exponent >> 1n;
+        base = (base * base) % modulus;
+      }
+      return result;
+    }
+
+    function initializeKeys() {
+      document.getElementById("userIdDisplay").textContent = userId;
+
+      if (localStorage.getItem("secretNumber")) {
+        secretNumber = BigInt(localStorage.getItem("secretNumber"));
+      } else {
+        secretNumber = BigInt(Math.floor(Math.random() * 100000));
+        localStorage.setItem("secretNumber", secretNumber.toString());
+      }
+
+      publicKey = (g ** secretNumber) % p;
+      document.getElementById("publicKey").textContent = publicKey.toString();
+      submitPublicKey();
+    }
+
+    async function submitPublicKey() {
+      // store user's public key on the server
+      await fetch("/submit_key", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ user_id: userId, public_key: publicKey.toString() })
+      });
+    }
+
+    async function encryptMessage() {
+      if (!encryptionKey) {
+        alert("No encryption key yet. Please fetch another user's key first.");
+        return;
+      }
+
+      let message = document.getElementById("messageInput").value;
+      let encrypted = CryptoJS.AES.encrypt(message, encryptionKey.toString()).toString();
+
+      await fetch("/store_message", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ encrypted_message: encrypted })
+      });
+
+      document.getElementById("messageInput").value = "";
+      fetchStoredMessages();
+    }
+
+    async function fetchStoredMessages() {
+      try {
+        let response = await fetch("/get_messages");
+        let messages = await response.json();
+        let decryptedList = document.getElementById("decryptedMessages");
+        decryptedList.innerHTML = "";
+
+        let latestMessages = messages.slice(-10);
+        latestMessages.forEach(encMsg => {
+          let decrypted;
+          try {
+            decrypted = encryptionKey
+              ? CryptoJS.AES.decrypt(encMsg, encryptionKey.toString()).toString(CryptoJS.enc.Utf8)
+              : "";
+            decrypted = decrypted.trim();
+          } catch (e) {
+            decrypted = "";
+          }
+
+          if (decrypted) {
+            let liDecrypted = document.createElement("li");
+            liDecrypted.textContent = decrypted;
+            decryptedList.appendChild(liDecrypted);
+          }
+        });
+      } catch (error) {
+        console.error("Error fetching messages:", error);
+      }
+    }
+
+    function decryptMessages() {
+      fetchStoredMessages();
+    }
+
+    window.onload = function() {
+      initializeKeys();
+      fetchStoredMessages();
+      setInterval(fetchStoredMessages, 3000);
+    };
+  </script>
+</body>
+</html>
